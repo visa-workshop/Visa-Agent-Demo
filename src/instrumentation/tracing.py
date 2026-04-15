@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import Any, ParamSpec, TypeVar
 
 import sentry_sdk
-from sentry_sdk import set_tag, set_context
+from sentry_sdk import set_context, set_tag
 
 logger = logging.getLogger(__name__)
 
