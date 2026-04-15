@@ -42,7 +42,20 @@ class CategorizationResult:
 # 2. Explain key categorization principles from the Visa rules
 # 3. Clarify important distinctions (e.g., counterfeit merchandise vs counterfeit card)
 # 4. Require JSON output with: category, condition, confidence, rationale, alternative_conditions
-_SYSTEM_PROMPT = ""
+_SYSTEM_PROMPT = (
+    "You are a Visa dispute categorization specialist. Categorize the dispute into one of "
+    "the 4 Visa categories:\n"
+    "- 10 (Fraud): Conditions 10.1-10.5\n"
+    "- 11 (Authorization): Conditions 11.1-11.3\n"
+    "- 12 (Processing Errors): Conditions 12.2-12.7\n"
+    "- 13 (Consumer Disputes): Conditions 13.1-13.9\n\n"
+    "Key principles:\n"
+    "- Counterfeit merchandise (fake goods) is 13.4, NOT 10.1 (counterfeit card fraud)\n"
+    "- Fraud requires unauthorized use indicators or fraud type codes\n"
+    "- Authorization issues involve declined/missing authorizations\n"
+    "- Processing errors involve incorrect amounts, currencies, duplicates\n\n"
+    "Return JSON with: category, condition, confidence (0-1), rationale, alternative_conditions (list)"
+)
 
 
 def categorize_dispute(case: DisputeCase) -> CategorizationResult:
@@ -57,7 +70,18 @@ def categorize_dispute(case: DisputeCase) -> CategorizationResult:
     2. Call chat_json() with the system prompt and user prompt
     3. Parse the JSON response into a CategorizationResult
     """
-    raise NotImplementedError("Module 1: Implement categorize_dispute")
+    user_prompt = _build_case_prompt(case)
+    result = chat_json(_SYSTEM_PROMPT, user_prompt)
+
+    return CategorizationResult(
+        category=DisputeCategory(result["category"]),
+        condition=DisputeCondition(result["condition"]),
+        confidence=float(result["confidence"]),
+        rationale=str(result["rationale"]),
+        alternative_conditions=[
+            DisputeCondition(c) for c in result.get("alternative_conditions", [])
+        ],
+    )
 
 
 def _build_case_prompt(case: DisputeCase) -> str:
@@ -69,4 +93,25 @@ def _build_case_prompt(case: DisputeCase) -> str:
     - Include evidence summary
     - Append the Visa rules context from get_categorization_context()
     """
-    raise NotImplementedError("Module 1: Implement _build_case_prompt")
+    rules_context = get_categorization_context()
+    fraud_type = case.fraud_type_code.value if case.fraud_type_code else "None"
+    statement = case.cardholder.cardholder_statement or "None"
+    evidence_summary = "; ".join(e.description for e in case.evidence) or "None"
+
+    return (
+        f"Transaction ID: {case.transaction.transaction_id}\n"
+        f"Amount: {case.transaction.amount} {case.transaction.currency}\n"
+        f"Merchant: {case.transaction.merchant_name}\n"
+        f"Transaction Date: {case.transaction.transaction_date}\n"
+        f"Processing Date: {case.transaction.processing_date}\n"
+        f"Environment: {case.transaction.environment.value}\n"
+        f"Is Chip Card: {case.transaction.is_chip_card}\n"
+        f"Is Chip Initiated: {case.transaction.is_chip_initiated}\n"
+        f"Is Recurring: {case.transaction.is_recurring}\n"
+        f"Authorization Code: {case.transaction.authorization_code or 'None'}\n"
+        f"Authorization Response Code: {case.transaction.authorization_response_code or 'None'}\n"
+        f"Fraud Type Code: {fraud_type}\n"
+        f"Cardholder Statement: {statement}\n"
+        f"Evidence: {evidence_summary}\n\n"
+        f"Visa Rules Context:\n{rules_context}"
+    )
