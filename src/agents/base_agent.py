@@ -55,7 +55,15 @@ class BaseDisputeAgent(ABC):
         - Human review flags
         - decided_by set to self.agent_type.value
         """
-        raise NotImplementedError("Module 2: Implement create_decision")
+        return DisputeDecision(
+            resolution=resolution,
+            rationale=rationale,
+            rule_citations=rule_evaluations,
+            confidence_score=confidence,
+            requires_human_review=requires_human_review,
+            human_review_reason=human_review_reason,
+            decided_by=self.agent_type.value,
+        )
 
     def _should_escalate_to_human(self, confidence: float, case: DisputeCase) -> bool:
         """Determine if a case should be escalated to human review.
@@ -64,7 +72,9 @@ class BaseDisputeAgent(ABC):
         - Confidence below 0.70 -> escalate
         - Dispute amount over $25,000 -> escalate
         """
-        raise NotImplementedError("Module 2: Implement _should_escalate_to_human")
+        if confidence < 0.70:
+            return True
+        return case.dispute_amount is not None and case.dispute_amount > 25000
 
     def _evaluate_dispute_with_llm(
         self,
@@ -80,4 +90,39 @@ class BaseDisputeAgent(ABC):
         2. Append the rules_context as reference
         3. Call chat_json(system_prompt, user_prompt) and return the result
         """
-        raise NotImplementedError("Module 2: Implement _evaluate_dispute_with_llm")
+        category = case.category.value if case.category else "Unknown"
+        condition = case.condition.value if case.condition else "Unknown"
+        statement = case.cardholder.cardholder_statement or "None"
+        fraud_type = case.fraud_type_code.value if case.fraud_type_code else "None"
+        evidence_lines = "\n".join(
+            f"  - [{e.provided_by}] {e.description} (compelling: {e.is_compelling_evidence})"
+            for e in case.evidence
+        ) or "  None"
+        dispute_amount = case.dispute_amount if case.dispute_amount is not None else "none"
+        dispute_filed = case.dispute_filed_date.strftime("%Y-%m-%d %H:%M:%S") if case.dispute_filed_date else "Unknown"
+
+        user_prompt = (
+            f"Case ID: {case.case_id}\n"
+            f"Category: {category}\n"
+            f"Condition: {condition}\n"
+            f"Transaction ID: {case.transaction.transaction_id}\n"
+            f"Amount: {case.transaction.amount} {case.transaction.currency}\n"
+            f"Dispute Amount: {dispute_amount}\n"
+            f"Merchant: {case.transaction.merchant_name}\n"
+            f"Transaction Date: {case.transaction.transaction_date}\n"
+            f"Processing Date: {case.transaction.processing_date}\n"
+            f"Dispute Filed Date: {dispute_filed}\n"
+            f"Environment: {case.transaction.environment.value}\n"
+            f"Is Chip Card: {case.transaction.is_chip_card}\n"
+            f"Is Chip Initiated: {case.transaction.is_chip_initiated}\n"
+            f"Is Recurring: {case.transaction.is_recurring}\n"
+            f"Authorization Code: {case.transaction.authorization_code or 'None'}\n"
+            f"Authorization Response Code: {case.transaction.authorization_response_code or 'None'}\n"
+            f"Fraud Type Code: {fraud_type}\n"
+            f"Issuer Certification: {case.issuer_certification or 'None'}\n"
+            f"Cardholder Statement: {statement}\n"
+            f"Evidence:\n{evidence_lines}\n\n"
+            f"Visa Rules Reference:\n{rules_context}"
+        )
+
+        return chat_json(system_prompt, user_prompt)
