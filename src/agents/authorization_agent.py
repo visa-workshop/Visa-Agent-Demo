@@ -9,7 +9,15 @@ Handles authorization-related disputes:
 - 11.3: No Authorization / Late Presentment
 """
 
+from typing import Any
+
 from src.agents.base_agent import BaseDisputeAgent
+from src.instrumentation.tracing import (
+    record_agent_decision,
+    record_agent_validation,
+    trace_agent_process,
+    trace_llm_call,
+)
 from src.llm.visa_rules import get_authorization_rules
 from src.models.dispute import DisputeCase, RuleEvaluationResult
 from src.models.enums import (
@@ -43,6 +51,7 @@ class AuthorizationDisputeAgent(BaseDisputeAgent):
     def __init__(self) -> None:
         super().__init__(AgentType.AUTHORIZATION)
 
+    @record_agent_validation("authorization_agent")
     async def validate(self, case: DisputeCase) -> bool:
         """Validate this agent can handle the case.
 
@@ -52,6 +61,17 @@ class AuthorizationDisputeAgent(BaseDisputeAgent):
             return False
         return case.condition.category == DisputeCategory.AUTHORIZATION
 
+    @trace_llm_call("authorization_agent")
+    def _evaluate_dispute_with_llm(
+        self,
+        case: DisputeCase,
+        rules_context: str,
+        system_prompt: str,
+    ) -> dict[str, Any]:
+        """Override to add Sentry LLM call tracing."""
+        return super()._evaluate_dispute_with_llm(case, rules_context, system_prompt)
+
+    @trace_agent_process("authorization_agent")
     async def process(self, case: DisputeCase) -> DisputeCase:
         """Process an authorization dispute using AI reasoning over Visa rules.
 
@@ -114,6 +134,15 @@ class AuthorizationDisputeAgent(BaseDisputeAgent):
             human_review_reason=human_reason,
         )
         case.decision = decision
+
+        record_agent_decision(
+            agent_name="authorization_agent",
+            case_id=case.case_id,
+            resolution=resolution.value,
+            confidence=confidence,
+            requires_human_review=requires_human,
+            rule_count=len(rule_evaluations),
+        )
 
         if requires_human:
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, human_reason or "Requires human review")
