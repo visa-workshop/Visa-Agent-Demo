@@ -74,12 +74,12 @@ def categorize_dispute(case: DisputeCase) -> CategorizationResult:
     result = chat_json(_SYSTEM_PROMPT, user_prompt)
 
     return CategorizationResult(
-        category=DisputeCategory(result["category"]),
-        condition=DisputeCondition(result["condition"]),
+        category=DisputeCategory(str(result["category"])),
+        condition=DisputeCondition(str(result["condition"])),
         confidence=float(result["confidence"]),
         rationale=str(result["rationale"]),
         alternative_conditions=[
-            DisputeCondition(c) for c in result.get("alternative_conditions", [])
+            DisputeCondition(str(c)) for c in result.get("alternative_conditions", [])
         ],
     )
 
