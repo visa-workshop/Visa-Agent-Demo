@@ -9,7 +9,10 @@ This is the core orchestrator that:
 
 import asyncio
 import logging
+import time
 from typing import Any
+
+import sentry_sdk
 
 from src.agents.authorization_agent import AuthorizationDisputeAgent
 from src.agents.base_agent import BaseDisputeAgent
@@ -98,14 +101,24 @@ class DisputeBrain:
         4. Enqueue the task
         5. Return the case_id
         """
-        self._cases[case.case_id] = case
-        case.advance_stage(DisputeLifecycleStage.INTAKE, "Dispute submitted to queue")
-        task = DisputeTask(
-            case_id=case.case_id,
-            action="process_dispute",
-        )
-        await self._queue.enqueue(task)
-        return case.case_id
+        with sentry_sdk.start_span(
+            op="brain.submit", name="DisputeBrain.submit_dispute"
+        ) as span:
+            self._cases[case.case_id] = case
+            case.advance_stage(DisputeLifecycleStage.INTAKE, "Dispute submitted to queue")
+            span.set_data("case_id", case.case_id)
+            sentry_sdk.add_breadcrumb(
+                category="brain.lifecycle",
+                message=f"Dispute {case.case_id} submitted to intake",
+                level="info",
+                data={"case_id": case.case_id, "stage": "intake"},
+            )
+            task = DisputeTask(
+                case_id=case.case_id,
+                action="process_dispute",
+            )
+            await self._queue.enqueue(task)
+            return case.case_id
 
     async def process_single(self, case: DisputeCase) -> DisputeCase:
         """Process a single dispute case synchronously (without the queue).
@@ -157,30 +170,40 @@ class DisputeBrain:
         TODO: Look up the case, advance to PRE_ARBITRATION stage,
         clear the previous decision, and run the PreArbitrationAgent.
         """
-        case = self._cases.get(case_id)
-        if case is None:
-            return None
-        case.advance_stage(DisputeLifecycleStage.PRE_ARBITRATION, "Escalated to pre-arbitration")
-        case.decision = None
-        agent = self._agents.get(AgentType.PRE_ARBITRATION.value)
-        if agent is None:
-            return None
-        return await agent.process(case)
+        with sentry_sdk.start_span(
+            op="brain.escalate_pre_arb",
+            name="DisputeBrain.escalate_to_pre_arbitration",
+        ) as span:
+            span.set_data("case_id", case_id)
+            case = self._cases.get(case_id)
+            if case is None:
+                return None
+            case.advance_stage(DisputeLifecycleStage.PRE_ARBITRATION, "Escalated to pre-arbitration")
+            case.decision = None
+            agent = self._agents.get(AgentType.PRE_ARBITRATION.value)
+            if agent is None:
+                return None
+            return await agent.process(case)
 
     async def escalate_to_arbitration(self, case_id: str) -> DisputeCase | None:
         """Escalate a case to arbitration after pre-arbitration cycle.
 
         TODO: Similar to escalate_to_pre_arbitration but advance to ARBITRATION.
         """
-        case = self._cases.get(case_id)
-        if case is None:
-            return None
-        case.advance_stage(DisputeLifecycleStage.ARBITRATION, "Escalated to arbitration")
-        case.decision = None
-        agent = self._agents.get(AgentType.PRE_ARBITRATION.value)
-        if agent is None:
-            return None
-        return await agent.process(case)
+        with sentry_sdk.start_span(
+            op="brain.escalate_arb",
+            name="DisputeBrain.escalate_to_arbitration",
+        ) as span:
+            span.set_data("case_id", case_id)
+            case = self._cases.get(case_id)
+            if case is None:
+                return None
+            case.advance_stage(DisputeLifecycleStage.ARBITRATION, "Escalated to arbitration")
+            case.decision = None
+            agent = self._agents.get(AgentType.PRE_ARBITRATION.value)
+            if agent is None:
+                return None
+            return await agent.process(case)
 
     async def approve_human_review(
         self,
@@ -194,19 +217,25 @@ class DisputeBrain:
         If approved -> advance to RESOLVED.
         If rejected -> advance to PROCESSING, clear decision.
         """
-        case = self._cases.get(case_id)
-        if case is None:
-            return None
-        if case.stage != DisputeLifecycleStage.HUMAN_REVIEW:
+        with sentry_sdk.start_span(
+            op="brain.human_review",
+            name="DisputeBrain.approve_human_review",
+        ) as span:
+            span.set_data("case_id", case_id)
+            span.set_data("approved", approved)
+            case = self._cases.get(case_id)
+            if case is None:
+                return None
+            if case.stage != DisputeLifecycleStage.HUMAN_REVIEW:
+                return case
+            if approved:
+                case.add_processing_note(f"Human review approved: {reviewer_notes}")
+                case.advance_stage(DisputeLifecycleStage.RESOLVED, "Approved by human reviewer")
+            else:
+                case.add_processing_note(f"Human review rejected: {reviewer_notes}")
+                case.decision = None
+                case.advance_stage(DisputeLifecycleStage.PROCESSING, "Rejected by human reviewer")
             return case
-        if approved:
-            case.add_processing_note(f"Human review approved: {reviewer_notes}")
-            case.advance_stage(DisputeLifecycleStage.RESOLVED, "Approved by human reviewer")
-        else:
-            case.add_processing_note(f"Human review rejected: {reviewer_notes}")
-            case.decision = None
-            case.advance_stage(DisputeLifecycleStage.PROCESSING, "Rejected by human reviewer")
-        return case
 
     # Internal methods
 
@@ -222,6 +251,7 @@ class DisputeBrain:
                     result = await self._handle_task(task)
                     await self._queue.complete_task(task.task_id, result)
                 except Exception as e:
+                    sentry_sdk.capture_exception(e)
                     logger.exception("Task %s failed: %s", task.task_id, e)
                     await self._queue.fail_task(task.task_id, str(e))
             except asyncio.CancelledError:
@@ -239,25 +269,32 @@ class DisputeBrain:
         - "arbitration" -> escalate_to_arbitration()
         Return a result dict with case_id and outcome.
         """
-        case = self._cases.get(task.case_id)
-        if case is None:
-            return {"case_id": task.case_id, "outcome": "case_not_found"}
+        with sentry_sdk.start_span(
+            op="brain.handle_task", name="DisputeBrain.handle_task"
+        ) as span:
+            span.set_data("task_id", task.task_id)
+            span.set_data("action", task.action)
+            span.set_data("case_id", task.case_id)
 
-        if task.action == "process_dispute":
-            result_case = await self._execute_dispute_processing(case)
-            return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
-        elif task.action == "pre_arbitration":
-            result_case = await self.escalate_to_pre_arbitration(task.case_id)
-            if result_case is None:
-                return {"case_id": task.case_id, "outcome": "escalation_failed"}
-            return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
-        elif task.action == "arbitration":
-            result_case = await self.escalate_to_arbitration(task.case_id)
-            if result_case is None:
-                return {"case_id": task.case_id, "outcome": "escalation_failed"}
-            return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
-        else:
-            return {"case_id": task.case_id, "outcome": f"unknown_action_{task.action}"}
+            case = self._cases.get(task.case_id)
+            if case is None:
+                return {"case_id": task.case_id, "outcome": "case_not_found"}
+
+            if task.action == "process_dispute":
+                result_case = await self._execute_dispute_processing(case)
+                return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
+            elif task.action == "pre_arbitration":
+                result_case = await self.escalate_to_pre_arbitration(task.case_id)
+                if result_case is None:
+                    return {"case_id": task.case_id, "outcome": "escalation_failed"}
+                return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
+            elif task.action == "arbitration":
+                result_case = await self.escalate_to_arbitration(task.case_id)
+                if result_case is None:
+                    return {"case_id": task.case_id, "outcome": "escalation_failed"}
+                return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
+            else:
+                return {"case_id": task.case_id, "outcome": f"unknown_action_{task.action}"}
 
     async def _execute_dispute_processing(self, case: DisputeCase) -> DisputeCase:
         """Execute the full dispute processing pipeline.
@@ -279,45 +316,96 @@ class DisputeBrain:
           - Validate the agent can handle the case
           - Call agent.process(case) and return the result
         """
-        # Stage 1 - Validation
-        case.advance_stage(DisputeLifecycleStage.VALIDATION, "Starting validation")
-        errors = self._validate_case(case)
-        if errors:
-            case.add_processing_note(f"Validation failed: {'; '.join(errors)}")
-            case.advance_stage(DisputeLifecycleStage.REJECTED, "Validation failed")
-            return case
+        with sentry_sdk.start_span(
+            op="brain.process_dispute",
+            name="DisputeBrain.execute_dispute_processing",
+        ) as span:
+            span.set_data("case_id", case.case_id)
+            pipeline_start = time.monotonic()
 
-        # Stage 2 - Categorization
-        case.advance_stage(DisputeLifecycleStage.CATEGORIZATION, "Starting categorization")
-        cat_result = categorize_dispute(case)
-        case.category = cat_result.category
-        case.condition = cat_result.condition
-        case.add_processing_note(
-            f"Categorized as {cat_result.category.value}/{cat_result.condition.value} "
-            f"(confidence: {cat_result.confidence:.2f})"
-        )
-        if case.dispute_amount is None:
-            case.dispute_amount = case.transaction.amount
-        if case.dispute_currency is None:
-            case.dispute_currency = case.transaction.currency
-        if case.dispute_filed_date is None:
-            from datetime import datetime
-            case.dispute_filed_date = datetime.utcnow()
+            # Stage 1 - Validation
+            case.advance_stage(DisputeLifecycleStage.VALIDATION, "Starting validation")
+            span.set_data("stage", "validation")
+            errors = self._validate_case(case)
+            if errors:
+                case.add_processing_note(f"Validation failed: {'; '.join(errors)}")
+                case.advance_stage(DisputeLifecycleStage.REJECTED, "Validation failed")
+                span.set_data("pipeline_duration_ms", round((time.monotonic() - pipeline_start) * 1000, 2))
+                return case
 
-        # Stage 3 - Agent Processing
-        case.advance_stage(DisputeLifecycleStage.PROCESSING, "Routing to agent")
-        agent = self._get_agent_for_case(case)
-        if agent is None:
-            case.add_processing_note("No agent found for case")
-            case.advance_stage(DisputeLifecycleStage.FAILED, "No suitable agent")
-            return case
+            # Stage 2 - Categorization
+            case.advance_stage(DisputeLifecycleStage.CATEGORIZATION, "Starting categorization")
+            span.set_data("stage", "categorization")
+            cat_result = categorize_dispute(case)
+            case.category = cat_result.category
+            case.condition = cat_result.condition
+            span.set_data("category", cat_result.category.value)
+            span.set_data("condition", cat_result.condition.value)
+            sentry_sdk.add_breadcrumb(
+                category="brain.lifecycle",
+                message=f"Categorized as {cat_result.category.value}/{cat_result.condition.value}",
+                level="info",
+                data={
+                    "case_id": case.case_id,
+                    "category": cat_result.category.value,
+                    "condition": cat_result.condition.value,
+                    "stage": "categorization",
+                },
+            )
+            case.add_processing_note(
+                f"Categorized as {cat_result.category.value}/{cat_result.condition.value} "
+                f"(confidence: {cat_result.confidence:.2f})"
+            )
+            if case.dispute_amount is None:
+                case.dispute_amount = case.transaction.amount
+            if case.dispute_currency is None:
+                case.dispute_currency = case.transaction.currency
+            if case.dispute_filed_date is None:
+                from datetime import datetime
+                case.dispute_filed_date = datetime.utcnow()
 
-        if not await agent.validate(case):
-            case.add_processing_note(f"Agent {agent.agent_type.value} cannot handle this case")
-            case.advance_stage(DisputeLifecycleStage.FAILED, "Agent validation failed")
-            return case
+            # Stage 3 - Agent Processing
+            case.advance_stage(DisputeLifecycleStage.PROCESSING, "Routing to agent")
+            span.set_data("stage", "agent_processing")
+            agent = self._get_agent_for_case(case)
+            if agent is None:
+                case.add_processing_note("No agent found for case")
+                case.advance_stage(DisputeLifecycleStage.FAILED, "No suitable agent")
+                span.set_data("pipeline_duration_ms", round((time.monotonic() - pipeline_start) * 1000, 2))
+                return case
 
-        return await agent.process(case)
+            span.set_data("agent", agent.agent_type.value)
+            sentry_sdk.add_breadcrumb(
+                category="brain.lifecycle",
+                message=f"Routed to agent {agent.agent_type.value}",
+                level="info",
+                data={
+                    "case_id": case.case_id,
+                    "agent": agent.agent_type.value,
+                    "stage": "agent_routing",
+                },
+            )
+
+            if not await agent.validate(case):
+                case.add_processing_note(f"Agent {agent.agent_type.value} cannot handle this case")
+                case.advance_stage(DisputeLifecycleStage.FAILED, "Agent validation failed")
+                span.set_data("pipeline_duration_ms", round((time.monotonic() - pipeline_start) * 1000, 2))
+                return case
+
+            result = await agent.process(case)
+
+            sentry_sdk.add_breadcrumb(
+                category="brain.lifecycle",
+                message=f"Decision reached for {case.case_id}: {result.stage.value}",
+                level="info",
+                data={
+                    "case_id": case.case_id,
+                    "final_stage": result.stage.value,
+                    "stage": "decision",
+                },
+            )
+            span.set_data("pipeline_duration_ms", round((time.monotonic() - pipeline_start) * 1000, 2))
+            return result
 
     def _validate_case(self, case: DisputeCase) -> list[str]:
         """Perform basic validation on the dispute case.
