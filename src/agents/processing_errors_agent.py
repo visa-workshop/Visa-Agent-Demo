@@ -12,7 +12,15 @@ Handles processing error disputes:
 - 12.7: Invalid Data
 """
 
+from typing import Any
+
 from src.agents.base_agent import BaseDisputeAgent
+from src.instrumentation.tracing import (
+    record_agent_decision,
+    record_agent_validation,
+    trace_agent_process,
+    trace_llm_call,
+)
 from src.llm.visa_rules import get_processing_errors_rules
 from src.models.dispute import DisputeCase, RuleEvaluationResult
 from src.models.enums import (
@@ -48,6 +56,7 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
     def __init__(self) -> None:
         super().__init__(AgentType.PROCESSING_ERRORS)
 
+    @record_agent_validation("processing_errors_agent")
     async def validate(self, case: DisputeCase) -> bool:
         """Validate this agent can handle the case.
 
@@ -57,6 +66,7 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
             return False
         return case.condition.category == DisputeCategory.PROCESSING_ERRORS
 
+    @trace_agent_process("processing_errors_agent")
     async def process(self, case: DisputeCase) -> DisputeCase:
         """Process a processing error dispute using AI reasoning over Visa rules.
 
@@ -116,9 +126,28 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
         )
         case.decision = decision
 
+        record_agent_decision(
+            agent_name="processing_errors_agent",
+            case_id=case.case_id,
+            resolution=resolution.value,
+            confidence=confidence,
+            requires_human_review=requires_human,
+            rule_count=len(rule_evaluations),
+        )
+
         if requires_human:
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, human_reason or "Requires human review")
         else:
             case.advance_stage(DisputeLifecycleStage.RESOLVED, "Processing error dispute resolved")
 
         return case
+
+    @trace_llm_call("processing_errors_agent")
+    def _evaluate_dispute_with_llm(
+        self,
+        case: DisputeCase,
+        rules_context: str,
+        system_prompt: str,
+    ) -> dict[str, Any]:
+        """Override to add Sentry LLM call tracing."""
+        return super()._evaluate_dispute_with_llm(case, rules_context, system_prompt)

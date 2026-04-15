@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from src.api.routes import router, set_brain
+from src.instrumentation import init_sentry
 from src.orchestrator.brain import DisputeBrain
 from src.queue.task_queue import DisputeTaskQueue
 
@@ -15,6 +16,9 @@ logging.basicConfig(
     format="%(asctime)s | %(name)-30s | %(levelname)-7s | %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Initialize Sentry instrumentation (no-op if SENTRY_DSN is not set)
+init_sentry()
 
 
 @asynccontextmanager

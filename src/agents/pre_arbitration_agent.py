@@ -7,6 +7,12 @@ to evaluate pre-arbitration attempts, responses, and arbitration filings.
 from typing import Any
 
 from src.agents.base_agent import BaseDisputeAgent
+from src.instrumentation.tracing import (
+    record_agent_decision,
+    record_agent_validation,
+    trace_agent_process,
+    trace_llm_call,
+)
 from src.llm.openai_client import chat_json
 from src.llm.visa_rules import get_arbitration_rules, get_compelling_evidence_rules
 from src.models.dispute import DisputeCase, RuleEvaluationResult
@@ -48,6 +54,7 @@ class PreArbitrationAgent(BaseDisputeAgent):
     def __init__(self) -> None:
         super().__init__(AgentType.PRE_ARBITRATION)
 
+    @record_agent_validation("pre_arbitration_agent")
     async def validate(self, case: DisputeCase) -> bool:
         """This agent handles cases in pre-arbitration or arbitration stages.
 
@@ -60,6 +67,7 @@ class PreArbitrationAgent(BaseDisputeAgent):
             DisputeLifecycleStage.ARBITRATION,
         )
 
+    @trace_agent_process("pre_arbitration_agent")
     async def process(self, case: DisputeCase) -> DisputeCase:
         """Process a pre-arbitration or arbitration action using AI reasoning.
 
@@ -130,6 +138,14 @@ class PreArbitrationAgent(BaseDisputeAgent):
             human_review_reason="Arbitration cases require human oversight",
         )
         case.decision = decision
+        record_agent_decision(
+            agent_name="pre_arbitration_agent",
+            case_id=case.case_id,
+            resolution=decision.resolution.value,
+            confidence=decision.confidence_score,
+            requires_human_review=decision.requires_human_review,
+            rule_count=len(rule_evaluations),
+        )
         case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, "Arbitration requires human review")
         return case
 
@@ -168,6 +184,14 @@ class PreArbitrationAgent(BaseDisputeAgent):
                 confidence=confidence,
             )
             case.decision = decision
+            record_agent_decision(
+                agent_name="pre_arbitration_agent",
+                case_id=case.case_id,
+                resolution=decision.resolution.value,
+                confidence=decision.confidence_score,
+                requires_human_review=decision.requires_human_review,
+                rule_count=len(rule_evaluations),
+            )
             case.advance_stage(DisputeLifecycleStage.RESOLVED, f"{prefix} resolved")
         elif next_action == "awaiting_issuer_response":
             case.add_processing_note(f"{prefix}: awaiting issuer response")
@@ -182,6 +206,14 @@ class PreArbitrationAgent(BaseDisputeAgent):
                 human_review_reason=result.get("human_review_reason", "Arbitration filing decision required"),
             )
             case.decision = decision
+            record_agent_decision(
+                agent_name="pre_arbitration_agent",
+                case_id=case.case_id,
+                resolution=decision.resolution.value,
+                confidence=decision.confidence_score,
+                requires_human_review=decision.requires_human_review,
+                rule_count=len(rule_evaluations),
+            )
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, "Arbitration escalation requires review")
         else:
             decision = self.create_decision(
@@ -193,10 +225,19 @@ class PreArbitrationAgent(BaseDisputeAgent):
                 human_review_reason=result.get("human_review_reason", "Manual review required"),
             )
             case.decision = decision
+            record_agent_decision(
+                agent_name="pre_arbitration_agent",
+                case_id=case.case_id,
+                resolution=decision.resolution.value,
+                confidence=decision.confidence_score,
+                requires_human_review=decision.requires_human_review,
+                rule_count=len(rule_evaluations),
+            )
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, "Requires human review")
 
         return case
 
+    @trace_llm_call("pre_arbitration_agent")
     def _evaluate_pre_arb_with_llm(
         self, case: DisputeCase, rules_context: str
     ) -> dict[str, Any]:
