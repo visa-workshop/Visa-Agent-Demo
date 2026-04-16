@@ -5,6 +5,7 @@ to validate disputes and render decisions.
 """
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -55,7 +56,7 @@ class BaseDisputeAgent(ABC):
         - Human review flags
         - decided_by set to self.agent_type.value
         """
-        return DisputeDecision(
+        decision = DisputeDecision(
             resolution=resolution,
             rationale=rationale,
             rule_citations=rule_evaluations,
@@ -64,6 +65,20 @@ class BaseDisputeAgent(ABC):
             human_review_reason=human_review_reason,
             decided_by=self.agent_type.value,
         )
+        self.logger.info(
+            "Decision created: resolution=%s, confidence_score=%.2f, "
+            "decided_by=%s, requires_human_review=%s",
+            resolution.value,
+            confidence,
+            self.agent_type.value,
+            requires_human_review,
+        )
+        if requires_human_review:
+            self.logger.warning(
+                "Decision requires human review: reason=%s",
+                human_review_reason,
+            )
+        return decision
 
     def _should_escalate_to_human(self, confidence: float, case: DisputeCase) -> bool:
         """Determine if a case should be escalated to human review.
@@ -72,9 +87,26 @@ class BaseDisputeAgent(ABC):
         - Confidence below 0.70 -> escalate
         - Dispute amount over $25,000 -> escalate
         """
+        dispute_amount = case.dispute_amount
+        self.logger.info(
+            "Escalation check: confidence=%.2f, dispute_amount=%s",
+            confidence,
+            dispute_amount,
+        )
         if confidence < 0.70:
+            self.logger.warning(
+                "Escalating to human: low confidence %.2f (threshold 0.70)",
+                confidence,
+            )
             return True
-        return case.dispute_amount is not None and case.dispute_amount > 25000
+        if dispute_amount is not None and dispute_amount > 25000:
+            self.logger.warning(
+                "Escalating to human: high dispute amount $%.2f (threshold $25,000)",
+                dispute_amount,
+            )
+            return True
+        self.logger.info("No escalation needed")
+        return False
 
     def _evaluate_dispute_with_llm(
         self,
@@ -92,6 +124,12 @@ class BaseDisputeAgent(ABC):
         """
         category = case.category.value if case.category else "Unknown"
         condition = case.condition.value if case.condition else "Unknown"
+        self.logger.info(
+            "Evaluating dispute with LLM: case_id=%s, category=%s, condition=%s",
+            case.case_id,
+            category,
+            condition,
+        )
         statement = case.cardholder.cardholder_statement or "None"
         fraud_type = case.fraud_type_code.value if case.fraud_type_code else "None"
         evidence_lines = "\n".join(
@@ -125,4 +163,23 @@ class BaseDisputeAgent(ABC):
             f"Visa Rules Reference:\n{rules_context}"
         )
 
-        return chat_json(system_prompt, user_prompt)
+        start_time = time.time()
+        try:
+            result = chat_json(system_prompt, user_prompt)
+        except Exception:
+            elapsed = time.time() - start_time
+            self.logger.error(
+                "LLM call failed after %.2fs for case_id=%s",
+                elapsed,
+                case.case_id,
+            )
+            raise
+        elapsed = time.time() - start_time
+        self.logger.info(
+            "LLM call completed in %.2fs: resolution=%s, confidence=%s, is_valid=%s",
+            elapsed,
+            result.get("resolution"),
+            result.get("confidence"),
+            result.get("is_valid"),
+        )
+        return result
