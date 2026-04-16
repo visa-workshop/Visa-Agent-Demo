@@ -9,6 +9,8 @@ Handles authorization-related disputes:
 - 11.3: No Authorization / Late Presentment
 """
 
+import time
+
 from src.agents.base_agent import BaseDisputeAgent
 from src.llm.visa_rules import get_authorization_rules
 from src.models.dispute import DisputeCase, RuleEvaluationResult
@@ -63,11 +65,49 @@ class AuthorizationDisputeAgent(BaseDisputeAgent):
         5. Handle invalid disputes vs valid decisions
         6. Check human escalation, advance to final stage
         """
+        condition_value = case.condition.value if case.condition else "Unknown"
+        self.logger.info(
+            "Processing authorization dispute: case_id=%s condition=%s "
+            "transaction_id=%s amount=%s authorization_code=%s "
+            "authorization_response_code=%s",
+            case.case_id,
+            condition_value,
+            case.transaction.transaction_id,
+            case.transaction.amount,
+            case.transaction.authorization_code,
+            case.transaction.authorization_response_code,
+        )
+
         case.assigned_agent = self.agent_type.value
         case.advance_stage(DisputeLifecycleStage.RULE_EVALUATION, "Starting authorization rule evaluation")
 
         rules_context = get_authorization_rules()
-        result = self._evaluate_dispute_with_llm(case, rules_context, _AUTH_SYSTEM_PROMPT)
+
+        start_time = time.time()
+        try:
+            result = self._evaluate_dispute_with_llm(case, rules_context, _AUTH_SYSTEM_PROMPT)
+        except Exception:
+            self.logger.error(
+                "LLM evaluation failed for case_id=%s",
+                case.case_id,
+                exc_info=True,
+            )
+            raise
+        elapsed_ms = (time.time() - start_time) * 1000
+        self.logger.info(
+            "LLM evaluation completed in %.1fms for case_id=%s",
+            elapsed_ms,
+            case.case_id,
+        )
+
+        num_citations = len(result.get("rule_citations", []))
+        self.logger.info(
+            "LLM result: is_valid=%s resolution=%s confidence=%s rule_citations=%d",
+            result.get("is_valid"),
+            result.get("resolution"),
+            result.get("confidence"),
+            num_citations,
+        )
 
         rule_evaluations = []
         for citation in result.get("rule_citations", []):
@@ -84,6 +124,11 @@ class AuthorizationDisputeAgent(BaseDisputeAgent):
         case.advance_stage(DisputeLifecycleStage.DECISION, "Rule evaluation complete")
 
         if not result.get("is_valid", True):
+            self.logger.warning(
+                "Dispute flagged as invalid: case_id=%s reason=%s",
+                case.case_id,
+                result.get("validity_reason", result.get("rationale", "Invalid dispute")),
+            )
             decision = self.create_decision(
                 resolution=DisputeResolution.INVALID_DISPUTE,
                 rationale=result.get("validity_reason", result.get("rationale", "Invalid dispute")),
@@ -105,6 +150,13 @@ class AuthorizationDisputeAgent(BaseDisputeAgent):
             if requires_human:
                 human_reason = "Low confidence or high-value dispute"
 
+        if requires_human:
+            self.logger.warning(
+                "Human escalation triggered: case_id=%s reason=%s",
+                case.case_id,
+                human_reason,
+            )
+
         decision = self.create_decision(
             resolution=resolution,
             rationale=result.get("rationale", "Authorization evaluation complete"),
@@ -114,6 +166,15 @@ class AuthorizationDisputeAgent(BaseDisputeAgent):
             human_review_reason=human_reason,
         )
         case.decision = decision
+
+        self.logger.info(
+            "Final decision: resolution=%s confidence=%s "
+            "requires_human_review=%s decided_by=%s",
+            decision.resolution.value,
+            decision.confidence_score,
+            decision.requires_human_review,
+            decision.decided_by,
+        )
 
         if requires_human:
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, human_reason or "Requires human review")
