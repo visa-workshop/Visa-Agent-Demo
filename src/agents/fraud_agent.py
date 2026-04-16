@@ -11,6 +11,8 @@ Handles all fraud-related disputes including:
 - 10.5: Visa Fraud Monitoring Program
 """
 
+import time
+
 from src.agents.base_agent import BaseDisputeAgent
 from src.llm.visa_rules import get_fraud_rules
 from src.models.dispute import DisputeCase, RuleEvaluationResult
@@ -81,8 +83,35 @@ class FraudDisputeAgent(BaseDisputeAgent):
         case.assigned_agent = self.agent_type.value
         case.advance_stage(DisputeLifecycleStage.RULE_EVALUATION, "Starting fraud rule evaluation")
 
+        condition = case.condition.value if case.condition else "Unknown"
+        self.logger.info(
+            "Processing fraud dispute: case_id=%s condition=%s transaction_id=%s amount=%s",
+            case.case_id,
+            condition,
+            case.transaction.transaction_id,
+            case.transaction.amount,
+        )
+
         rules_context = get_fraud_rules()
-        result = self._evaluate_dispute_with_llm(case, rules_context, _FRAUD_SYSTEM_PROMPT)
+
+        start_time = time.time()
+        try:
+            result = self._evaluate_dispute_with_llm(case, rules_context, _FRAUD_SYSTEM_PROMPT)
+        except Exception:
+            self.logger.error(
+                "LLM evaluation failed for case_id=%s", case.case_id, exc_info=True
+            )
+            raise
+        elapsed_ms = (time.time() - start_time) * 1000
+        self.logger.info("LLM call completed in %.1fms", elapsed_ms)
+
+        self.logger.info(
+            "LLM evaluation result: is_valid=%s resolution=%s confidence=%s rule_citations=%d",
+            result.get("is_valid"),
+            result.get("resolution"),
+            result.get("confidence"),
+            len(result.get("rule_citations", [])),
+        )
 
         rule_evaluations = []
         for citation in result.get("rule_citations", []):
@@ -99,6 +128,11 @@ class FraudDisputeAgent(BaseDisputeAgent):
         case.advance_stage(DisputeLifecycleStage.DECISION, "Rule evaluation complete")
 
         if not result.get("is_valid", True):
+            self.logger.warning(
+                "Dispute flagged as invalid: case_id=%s reason=%s",
+                case.case_id,
+                result.get("validity_reason", result.get("rationale", "Invalid dispute")),
+            )
             decision = self.create_decision(
                 resolution=DisputeResolution.INVALID_DISPUTE,
                 rationale=result.get("validity_reason", result.get("rationale", "Invalid dispute")),
@@ -115,10 +149,22 @@ class FraudDisputeAgent(BaseDisputeAgent):
         requires_human = result.get("requires_human_review", False)
         human_reason = result.get("human_review_reason")
 
+        if requires_human:
+            self.logger.warning(
+                "Human escalation triggered by LLM: case_id=%s reason=%s",
+                case.case_id,
+                human_reason,
+            )
+
         if not requires_human:
             requires_human = self._should_escalate_to_human(confidence, case)
             if requires_human:
                 human_reason = "Low confidence or high-value dispute"
+                self.logger.warning(
+                    "Human escalation triggered by threshold check: case_id=%s reason=%s",
+                    case.case_id,
+                    human_reason,
+                )
 
         decision = self.create_decision(
             resolution=resolution,
@@ -129,6 +175,14 @@ class FraudDisputeAgent(BaseDisputeAgent):
             human_review_reason=human_reason,
         )
         case.decision = decision
+
+        self.logger.info(
+            "Final decision: resolution=%s confidence=%s requires_human_review=%s decided_by=%s",
+            decision.resolution,
+            decision.confidence_score,
+            decision.requires_human_review,
+            decision.decided_by,
+        )
 
         if requires_human:
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, human_reason or "Requires human review")
