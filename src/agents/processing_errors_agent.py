@@ -12,6 +12,8 @@ Handles processing error disputes:
 - 12.7: Invalid Data
 """
 
+import time
+
 from src.agents.base_agent import BaseDisputeAgent
 from src.llm.visa_rules import get_processing_errors_rules
 from src.models.dispute import DisputeCase, RuleEvaluationResult
@@ -64,11 +66,49 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
         Use get_processing_errors_rules() for rules context and
         _PROC_ERRORS_SYSTEM_PROMPT for the system prompt.
         """
+        condition = case.condition.value if case.condition else "Unknown"
+        self.logger.info(
+            "Processing errors evaluation started | case_id=%s condition=%s "
+            "transaction_id=%s amount=%s currency=%s",
+            case.case_id,
+            condition,
+            case.transaction.transaction_id,
+            case.transaction.amount,
+            case.transaction.currency,
+        )
+
         case.assigned_agent = self.agent_type.value
         case.advance_stage(DisputeLifecycleStage.RULE_EVALUATION, "Starting processing errors rule evaluation")
 
         rules_context = get_processing_errors_rules()
-        result = self._evaluate_dispute_with_llm(case, rules_context, _PROC_ERRORS_SYSTEM_PROMPT)
+
+        start_time = time.time()
+        try:
+            result = self._evaluate_dispute_with_llm(case, rules_context, _PROC_ERRORS_SYSTEM_PROMPT)
+        except Exception:
+            self.logger.error(
+                "LLM evaluation failed | case_id=%s condition=%s",
+                case.case_id,
+                condition,
+                exc_info=True,
+            )
+            raise
+        elapsed_ms = (time.time() - start_time) * 1000
+        self.logger.info(
+            "LLM call completed | case_id=%s elapsed_ms=%.1f",
+            case.case_id,
+            elapsed_ms,
+        )
+
+        self.logger.info(
+            "LLM evaluation result | case_id=%s is_valid=%s resolution=%s "
+            "confidence=%s rule_citations_count=%d",
+            case.case_id,
+            result.get("is_valid"),
+            result.get("resolution"),
+            result.get("confidence"),
+            len(result.get("rule_citations", [])),
+        )
 
         rule_evaluations = []
         for citation in result.get("rule_citations", []):
@@ -85,6 +125,11 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
         case.advance_stage(DisputeLifecycleStage.DECISION, "Rule evaluation complete")
 
         if not result.get("is_valid", True):
+            self.logger.warning(
+                "Dispute flagged as invalid | case_id=%s reason=%s",
+                case.case_id,
+                result.get("validity_reason", result.get("rationale", "Invalid dispute")),
+            )
             decision = self.create_decision(
                 resolution=DisputeResolution.INVALID_DISPUTE,
                 rationale=result.get("validity_reason", result.get("rationale", "Invalid dispute")),
@@ -93,6 +138,15 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
             )
             case.decision = decision
             case.advance_stage(DisputeLifecycleStage.RESOLVED, "Invalid dispute")
+            self.logger.info(
+                "Final decision | case_id=%s resolution=%s confidence=%s "
+                "requires_human_review=%s decided_by=%s",
+                case.case_id,
+                decision.resolution.value,
+                decision.confidence_score,
+                decision.requires_human_review,
+                decision.decided_by,
+            )
             return case
 
         confidence = result.get("confidence", 0.85)
@@ -105,6 +159,13 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
             requires_human = self._should_escalate_to_human(confidence, case)
             if requires_human:
                 human_reason = "Low confidence or high-value dispute"
+
+        if requires_human:
+            self.logger.warning(
+                "Human escalation triggered | case_id=%s reason=%s",
+                case.case_id,
+                human_reason,
+            )
 
         decision = self.create_decision(
             resolution=resolution,
@@ -120,5 +181,15 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, human_reason or "Requires human review")
         else:
             case.advance_stage(DisputeLifecycleStage.RESOLVED, "Processing error dispute resolved")
+
+        self.logger.info(
+            "Final decision | case_id=%s resolution=%s confidence=%s "
+            "requires_human_review=%s decided_by=%s",
+            case.case_id,
+            decision.resolution.value,
+            decision.confidence_score,
+            decision.requires_human_review,
+            decision.decided_by,
+        )
 
         return case
