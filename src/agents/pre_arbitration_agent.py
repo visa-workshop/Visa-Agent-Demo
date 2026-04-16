@@ -35,11 +35,40 @@ _PRE_ARB_SYSTEM_PROMPT = (
     "3. Acquirer's grounds for pre-arbitration\n"
     "4. Issuer's response adequacy\n"
     "5. Whether escalation to arbitration is warranted\n\n"
-    "Return JSON with: has_compelling_evidence (bool), resolution (str), confidence (float 0-1), "
+    "Return JSON with: has_compelling_evidence (bool), resolution (str — must be one of: "
+    "issuer_win, acquirer_win, split_liability, withdrawn, escalated_pre_arbitration, "
+    "escalated_arbitration, human_override, invalid_dispute), confidence (float 0-1), "
     "rationale (str), rule_citations (list of objects with rule_section, rule_description, "
     "is_satisfied, details), next_action (str: resolved/awaiting_issuer_response/escalate_arbitration/human_review), "
     "requires_human_review (bool), human_review_reason (str or null)"
 )
+
+
+def _safe_resolution(resolution_str: str) -> DisputeResolution:
+    """Map an LLM resolution string to a valid DisputeResolution enum value."""
+    try:
+        return DisputeResolution(resolution_str)
+    except ValueError:
+        normalized = resolution_str.strip().lower().replace(" ", "_").replace("-", "_")
+        for member in DisputeResolution:
+            if member.value == normalized:
+                return member
+        # Keyword-based fallback for free-text responses
+        lower = resolution_str.lower()
+        if "acquirer" in lower and ("win" in lower or "favor" in lower or "support" in lower):
+            return DisputeResolution.ACQUIRER_WIN
+        if "issuer" in lower and ("win" in lower or "favor" in lower):
+            return DisputeResolution.ISSUER_WIN
+        if "split" in lower:
+            return DisputeResolution.SPLIT_LIABILITY
+        if "invalid" in lower:
+            return DisputeResolution.INVALID_DISPUTE
+        if "withdraw" in lower:
+            return DisputeResolution.WITHDRAWN
+        if "arbitration" in lower:
+            return DisputeResolution.ESCALATED_ARBITRATION
+        # Default to acquirer_win for pre-arb with compelling evidence context
+        return DisputeResolution.ACQUIRER_WIN
 
 
 class PreArbitrationAgent(BaseDisputeAgent):
@@ -162,7 +191,7 @@ class PreArbitrationAgent(BaseDisputeAgent):
 
         if next_action == "resolved":
             decision = self.create_decision(
-                resolution=DisputeResolution(resolution_str),
+                resolution=_safe_resolution(resolution_str),
                 rationale=result.get("rationale", f"{prefix} resolved"),
                 rule_evaluations=rule_evaluations,
                 confidence=confidence,
@@ -185,7 +214,7 @@ class PreArbitrationAgent(BaseDisputeAgent):
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, "Arbitration escalation requires review")
         else:
             decision = self.create_decision(
-                resolution=DisputeResolution(resolution_str),
+                resolution=_safe_resolution(resolution_str),
                 rationale=result.get("rationale", f"{prefix} requires review"),
                 rule_evaluations=rule_evaluations,
                 confidence=confidence,
