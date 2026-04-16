@@ -4,6 +4,7 @@ Uses OpenAI to reason over Visa Core Rules Sections 11.2, 11.5, and 11.11
 to evaluate pre-arbitration attempts, responses, and arbitration filings.
 """
 
+import time
 from typing import Any
 
 from src.agents.base_agent import BaseDisputeAgent
@@ -70,10 +71,22 @@ class PreArbitrationAgent(BaseDisputeAgent):
         """
         case.assigned_agent = self.agent_type.value
         if case.stage == DisputeLifecycleStage.PRE_ARBITRATION:
+            self.logger.info(
+                "Routing to pre_arbitration sub-flow",
+                extra={"case_id": case.case_id, "stage": case.stage.value},
+            )
             return await self._process_pre_arbitration(case)
         elif case.stage == DisputeLifecycleStage.PRE_ARBITRATION_RESPONSE:
+            self.logger.info(
+                "Routing to pre_arbitration_response sub-flow",
+                extra={"case_id": case.case_id, "stage": case.stage.value},
+            )
             return await self._process_pre_arbitration_response(case)
         elif case.stage == DisputeLifecycleStage.ARBITRATION:
+            self.logger.info(
+                "Routing to arbitration sub-flow",
+                extra={"case_id": case.case_id, "stage": case.stage.value},
+            )
             return await self._process_arbitration(case)
         return case
 
@@ -85,6 +98,14 @@ class PreArbitrationAgent(BaseDisputeAgent):
         evaluate with LLM, apply result.
         """
         case.pre_arbitration_attempts += 1
+        self.logger.info(
+            "Processing pre-arbitration attempt",
+            extra={
+                "case_id": case.case_id,
+                "pre_arbitration_attempts": case.pre_arbitration_attempts,
+                "transaction_id": case.transaction.transaction_id,
+            },
+        )
         rules_context = get_compelling_evidence_rules() + "\n\n" + get_arbitration_rules()
         result = self._evaluate_pre_arb_with_llm(case, rules_context)
         return self._apply_pre_arb_result(case, result, "Pre-arbitration")
@@ -94,6 +115,10 @@ class PreArbitrationAgent(BaseDisputeAgent):
 
         TODO: Get rules context, evaluate with LLM, apply result.
         """
+        self.logger.info(
+            "Processing pre-arbitration response",
+            extra={"case_id": case.case_id, "stage": case.stage.value},
+        )
         rules_context = get_compelling_evidence_rules() + "\n\n" + get_arbitration_rules()
         result = self._evaluate_pre_arb_with_llm(case, rules_context)
         return self._apply_pre_arb_result(case, result, "Pre-arbitration response")
@@ -106,6 +131,10 @@ class PreArbitrationAgent(BaseDisputeAgent):
         advance to HUMAN_REVIEW stage.
         """
         case.arbitration_filed = True
+        self.logger.info(
+            "Processing arbitration filing",
+            extra={"case_id": case.case_id, "arbitration_filed": True},
+        )
         rules_context = get_arbitration_rules()
         result = self._evaluate_pre_arb_with_llm(case, rules_context)
 
@@ -160,6 +189,11 @@ class PreArbitrationAgent(BaseDisputeAgent):
         resolution_str = result.get("resolution", "issuer_win")
         confidence = result.get("confidence", 0.80)
 
+        self.logger.info(
+            "Applying next_action path",
+            extra={"case_id": case.case_id, "next_action": next_action, "prefix": prefix},
+        )
+
         if next_action == "resolved":
             decision = self.create_decision(
                 resolution=DisputeResolution(resolution_str),
@@ -173,6 +207,10 @@ class PreArbitrationAgent(BaseDisputeAgent):
             case.add_processing_note(f"{prefix}: awaiting issuer response")
             case.advance_stage(DisputeLifecycleStage.PRE_ARBITRATION_RESPONSE, "Awaiting issuer response")
         elif next_action == "escalate_arbitration":
+            self.logger.warning(
+                "Escalating to arbitration",
+                extra={"case_id": case.case_id, "next_action": next_action},
+            )
             decision = self.create_decision(
                 resolution=DisputeResolution.ESCALATED_ARBITRATION,
                 rationale=result.get("rationale", "Escalating to arbitration"),
@@ -192,8 +230,22 @@ class PreArbitrationAgent(BaseDisputeAgent):
                 requires_human_review=True,
                 human_review_reason=result.get("human_review_reason", "Manual review required"),
             )
+            self.logger.warning(
+                "Escalating to human review",
+                extra={"case_id": case.case_id, "next_action": next_action},
+            )
             case.decision = decision
             case.advance_stage(DisputeLifecycleStage.HUMAN_REVIEW, "Requires human review")
+
+        self.logger.info(
+            "Pre-arbitration decision applied",
+            extra={
+                "case_id": case.case_id,
+                "resolution": resolution_str,
+                "confidence": confidence,
+                "requires_human_review": case.decision.requires_human_review if case.decision else False,
+            },
+        )
 
         return case
 
@@ -239,4 +291,30 @@ class PreArbitrationAgent(BaseDisputeAgent):
             f"Visa Rules Reference:\n{rules_context}"
         )
 
-        return chat_json(_PRE_ARB_SYSTEM_PROMPT, user_prompt)
+        start_time = time.time()
+        try:
+            result = chat_json(_PRE_ARB_SYSTEM_PROMPT, user_prompt)
+        except Exception:
+            self.logger.error(
+                "LLM call failed in pre-arbitration evaluation",
+                extra={"case_id": case.case_id, "stage": case.stage.value},
+                exc_info=True,
+            )
+            raise
+        elapsed_ms = (time.time() - start_time) * 1000
+        self.logger.info(
+            "LLM call completed",
+            extra={"case_id": case.case_id, "elapsed_ms": round(elapsed_ms, 2)},
+        )
+        self.logger.info(
+            "LLM evaluation result",
+            extra={
+                "case_id": case.case_id,
+                "has_compelling_evidence": result.get("has_compelling_evidence"),
+                "resolution": result.get("resolution"),
+                "confidence": result.get("confidence"),
+                "next_action": result.get("next_action"),
+                "rule_citations_count": len(result.get("rule_citations", [])),
+            },
+        )
+        return result
