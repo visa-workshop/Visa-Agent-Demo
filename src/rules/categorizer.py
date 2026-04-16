@@ -9,6 +9,7 @@ approach that reasons directly over the Visa rules text.
 """
 
 import logging
+import time
 from dataclasses import dataclass
 
 from src.llm.openai_client import chat_json
@@ -64,23 +65,98 @@ def categorize_dispute(case: DisputeCase) -> CategorizationResult:
     The LLM analyzes the transaction details, cardholder statement, evidence,
     and fraud indicators against the Visa Core Rules to determine the
     appropriate dispute category and condition.
-
-    TODO: Implement this function:
-    1. Build a user prompt with case details using _build_case_prompt()
-    2. Call chat_json() with the system prompt and user prompt
-    3. Parse the JSON response into a CategorizationResult
     """
+    txn = case.transaction
+    logger.info(
+        "categorize_dispute called: transaction_id=%s merchant=%s amount=%s currency=%s environment=%s",
+        txn.transaction_id,
+        txn.merchant_name,
+        txn.amount,
+        txn.currency,
+        txn.environment.value,
+    )
+
     user_prompt = _build_case_prompt(case)
-    result = chat_json(_SYSTEM_PROMPT, user_prompt)
+
+    start = time.monotonic()
+    try:
+        result = chat_json(_SYSTEM_PROMPT, user_prompt)
+    except Exception:
+        elapsed = time.monotonic() - start
+        logger.error(
+            "chat_json failed: transaction_id=%s elapsed_seconds=%.3f",
+            txn.transaction_id,
+            elapsed,
+        )
+        raise
+    elapsed = time.monotonic() - start
+
+    logger.info(
+        "chat_json completed: transaction_id=%s elapsed_seconds=%.3f",
+        txn.transaction_id,
+        elapsed,
+    )
+
+    # Validate and parse category
+    raw_category = str(result.get("category", ""))
+    raw_condition = str(result.get("condition", ""))
+    try:
+        category = DisputeCategory(raw_category)
+    except ValueError:
+        logger.error(
+            "invalid category from LLM: transaction_id=%s category=%s",
+            txn.transaction_id,
+            raw_category,
+        )
+        raise
+
+    try:
+        condition = DisputeCondition(raw_condition)
+    except ValueError:
+        logger.error(
+            "invalid condition from LLM: transaction_id=%s condition=%s",
+            txn.transaction_id,
+            raw_condition,
+        )
+        raise
+
+    confidence = float(result["confidence"])
+    rationale = str(result["rationale"])
+    alternative_conditions: list[DisputeCondition] = []
+    for c in result.get("alternative_conditions", []):
+        try:
+            alternative_conditions.append(DisputeCondition(str(c)))
+        except ValueError:
+            logger.warning(
+                "skipping invalid alternative condition: transaction_id=%s condition=%s",
+                txn.transaction_id,
+                c,
+            )
+
+    logger.info(
+        "categorization result: transaction_id=%s category=%s condition=%s confidence=%.2f rationale=%s alternative_conditions=%s",
+        txn.transaction_id,
+        category.value,
+        condition.value,
+        confidence,
+        rationale,
+        [ac.value for ac in alternative_conditions],
+    )
+
+    if confidence < 0.70:
+        logger.warning(
+            "low confidence: transaction_id=%s confidence=%.2f condition=%s",
+            txn.transaction_id,
+            confidence,
+            condition.value,
+        )
 
     return CategorizationResult(
-        category=DisputeCategory(str(result["category"])),
-        condition=DisputeCondition(str(result["condition"])),
-        confidence=float(result["confidence"]),
-        rationale=str(result["rationale"]),
-        alternative_conditions=[
-            DisputeCondition(str(c)) for c in result.get("alternative_conditions", [])
-        ],
+        category=category,
+        condition=condition,
+        confidence=confidence,
+        rationale=rationale,
+        alternative_conditions=alternative_conditions,
     )
 
 
