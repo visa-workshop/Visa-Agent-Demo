@@ -70,6 +70,23 @@ class DisputeBrain:
 
         logger.info("DisputeBrain initialized with %d sub-agents", len(self._agents))
 
+    # --- Public accessors (2.3) ---
+
+    @property
+    def agent_count(self) -> int:
+        """Return the number of loaded sub-agents."""
+        return len(self._agents)
+
+    @property
+    def queue_depth(self) -> dict[str, int]:
+        """Return current queue depth via the task queue."""
+        return self._queue.get_queue_depth()
+
+    @property
+    def queue_stats(self) -> dict[str, int]:
+        """Return queue statistics."""
+        return self._queue.get_stats()
+
     async def start(self) -> None:
         """Start the brain's worker loops to process tasks from the queue."""
         if self._running:
@@ -247,15 +264,15 @@ class DisputeBrain:
             result_case = await self._execute_dispute_processing(case)
             return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
         elif task.action == "pre_arbitration":
-            result_case = await self.escalate_to_pre_arbitration(task.case_id)
-            if result_case is None:
+            escalated = await self.escalate_to_pre_arbitration(task.case_id)
+            if escalated is None:
                 return {"case_id": task.case_id, "outcome": "escalation_failed"}
-            return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
+            return {"case_id": escalated.case_id, "outcome": escalated.stage.value}
         elif task.action == "arbitration":
-            result_case = await self.escalate_to_arbitration(task.case_id)
-            if result_case is None:
+            escalated = await self.escalate_to_arbitration(task.case_id)
+            if escalated is None:
                 return {"case_id": task.case_id, "outcome": "escalation_failed"}
-            return {"case_id": result_case.case_id, "outcome": result_case.stage.value}
+            return {"case_id": escalated.case_id, "outcome": escalated.stage.value}
         else:
             return {"case_id": task.case_id, "outcome": f"unknown_action_{task.action}"}
 
@@ -301,8 +318,8 @@ class DisputeBrain:
         if case.dispute_currency is None:
             case.dispute_currency = case.transaction.currency
         if case.dispute_filed_date is None:
-            from datetime import datetime
-            case.dispute_filed_date = datetime.utcnow()
+            from datetime import UTC, datetime
+            case.dispute_filed_date = datetime.now(UTC)
 
         # Stage 3 - Agent Processing
         case.advance_stage(DisputeLifecycleStage.PROCESSING, "Routing to agent")

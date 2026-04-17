@@ -97,9 +97,9 @@ class ProcessingErrorsAgent(BaseDisputeAgent):
 
         confidence = result.get("confidence", 0.85)
         resolution_str = result.get("resolution", "issuer_win")
-        resolution = DisputeResolution(resolution_str)
-        requires_human = result.get("requires_human_review", False)
-        human_reason = result.get("human_review_reason")
+        resolution, fallback_review, fallback_reason = self._parse_resolution(resolution_str)
+        requires_human = result.get("requires_human_review", False) or fallback_review
+        human_reason = result.get("human_review_reason") or fallback_reason
 
         if not requires_human:
             requires_human = self._should_escalate_to_human(confidence, case)

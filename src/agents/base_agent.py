@@ -65,6 +65,25 @@ class BaseDisputeAgent(ABC):
             decided_by=self.agent_type.value,
         )
 
+    def _parse_resolution(self, resolution_str: str) -> tuple[DisputeResolution, bool, str | None]:
+        """Safely parse a resolution string from LLM output.
+
+        Returns (resolution, requires_human_review, human_review_reason).
+        Falls back to ISSUER_WIN with human review if the value is unrecognized.
+        """
+        try:
+            return DisputeResolution(resolution_str), False, None
+        except ValueError:
+            self.logger.warning(
+                "Unrecognized resolution '%s' from LLM, falling back to ISSUER_WIN with human review",
+                resolution_str,
+            )
+            return (
+                DisputeResolution.ISSUER_WIN,
+                True,
+                f"LLM returned unrecognized resolution '{resolution_str}'",
+            )
+
     def _should_escalate_to_human(self, confidence: float, case: DisputeCase) -> bool:
         """Determine if a case should be escalated to human review.
 

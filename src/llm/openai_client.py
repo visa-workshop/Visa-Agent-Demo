@@ -7,13 +7,18 @@ JSON responses, retry logic, and consistent error handling.
 import json
 import logging
 import os
+import time
 from typing import Any
 
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, OpenAI, RateLimitError
 
 logger = logging.getLogger(__name__)
 
 _client: OpenAI | None = None
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # seconds
+_RETRYABLE_EXCEPTIONS = (APIConnectionError, APITimeoutError, RateLimitError)
 
 
 def get_client() -> OpenAI:
@@ -60,24 +65,41 @@ def chat_json(
         RuntimeError: If the API call fails or response cannot be parsed.
     """
     client = get_client()
+    last_exception: Exception | None = None
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+
+            content = response.choices[0].message.content
+            if content is None:
+                raise RuntimeError("OpenAI returned empty response")
+
+            result: dict[str, Any] = json.loads(content)
+            return result
+        except _RETRYABLE_EXCEPTIONS as exc:
+            last_exception = exc
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                "OpenAI API call failed (attempt %d/%d): %s. Retrying in %.1fs",
+                attempt + 1, _MAX_RETRIES, exc, delay,
+            )
+            time.sleep(delay)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Failed to parse OpenAI response as JSON: {exc}") from exc
+
+    raise RuntimeError(
+        f"OpenAI API call failed after {_MAX_RETRIES} attempts: {last_exception}"
     )
-
-    content = response.choices[0].message.content
-    if content is None:
-        raise RuntimeError("OpenAI returned empty response")
-
-    result: dict[str, Any] = json.loads(content)
-    return result
 
 
 def chat_text(
@@ -104,19 +126,34 @@ def chat_text(
         RuntimeError: If the API call fails.
     """
     client = get_client()
+    last_exception: Exception | None = None
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+            content = response.choices[0].message.content
+            if content is None:
+                raise RuntimeError("OpenAI returned empty response")
+
+            return content
+        except _RETRYABLE_EXCEPTIONS as exc:
+            last_exception = exc
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                "OpenAI API call failed (attempt %d/%d): %s. Retrying in %.1fs",
+                attempt + 1, _MAX_RETRIES, exc, delay,
+            )
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"OpenAI API call failed after {_MAX_RETRIES} attempts: {last_exception}"
     )
-
-    content = response.choices[0].message.content
-    if content is None:
-        raise RuntimeError("OpenAI returned empty response")
-
-    return content
