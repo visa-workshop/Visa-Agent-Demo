@@ -111,9 +111,9 @@ def _mock_categorization(lower_user: str, user_prompt: str) -> dict:
     fraud_keywords = ["unauthorized", "did not authorize", "not mine", "identity theft",
                       "stolen card", "stolen", "fraud"]
     if any(kw in statement for kw in fraud_keywords) and ("counterfeit" not in statement or "card" in statement):
-            if environment == "card_present":
-                return _cat_result("10", "10.3", 0.85, "Statement indicates fraud - card present", ["10.5"])
-            return _cat_result("10", "10.4", 0.85, "Statement indicates fraud - card absent", ["10.5"])
+        if environment == "card_present":
+            return _cat_result("10", "10.3", 0.85, "Statement indicates fraud - card present", ["10.5"])
+        return _cat_result("10", "10.4", 0.85, "Statement indicates fraud - card absent", ["10.5"])
 
     # Authorization disputes
     if auth_response != "none" and not auth_response.startswith("0"):
