@@ -1,6 +1,6 @@
 """Task models for the dispute processing queue."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -13,8 +13,8 @@ class DisputeTask(BaseModel):
     """A task in the dispute processing queue."""
 
     task_id: str = Field(default_factory=lambda: str(uuid4()))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Task metadata
     priority: TaskPriority = TaskPriority.MEDIUM
@@ -40,21 +40,21 @@ class DisputeTask(BaseModel):
         """Mark this task as being processed."""
         self.status = TaskStatus.IN_PROGRESS
         self.assigned_agent = agent
-        self.started_at = datetime.utcnow()
-        self.updated_at = datetime.utcnow()
+        self.started_at = datetime.now(UTC)
+        self.updated_at = datetime.now(UTC)
 
     def mark_completed(self, result: dict[str, Any]) -> None:
         """Mark this task as completed."""
         self.status = TaskStatus.COMPLETED
         self.result = result
-        self.completed_at = datetime.utcnow()
-        self.updated_at = datetime.utcnow()
+        self.completed_at = datetime.now(UTC)
+        self.updated_at = datetime.now(UTC)
 
     def mark_failed(self, error: str) -> None:
         """Mark this task as failed, with retry logic."""
         self.retry_count += 1
         self.error_message = error
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(UTC)
 
         if self.retry_count >= self.max_retries:
             self.status = TaskStatus.DEAD_LETTER

@@ -1,6 +1,6 @@
 """Core data models for dispute processing."""
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -71,7 +71,7 @@ class DisputeEvidence(BaseModel):
     description: str
     evidence_type: str
     provided_by: str  # "issuer" or "acquirer"
-    submitted_at: datetime = Field(default_factory=datetime.utcnow)
+    submitted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     is_compelling_evidence: bool = False
     document_references: list[str] = Field(default_factory=list)
 
@@ -84,7 +84,7 @@ class RuleEvaluationResult(BaseModel):
     rule_description: str
     is_satisfied: bool
     details: str
-    evaluated_at: datetime = Field(default_factory=datetime.utcnow)
+    evaluated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class DisputeDecision(BaseModel):
@@ -97,7 +97,7 @@ class DisputeDecision(BaseModel):
     confidence_score: float = Field(..., ge=0.0, le=1.0)
     requires_human_review: bool = False
     human_review_reason: str | None = None
-    decided_at: datetime = Field(default_factory=datetime.utcnow)
+    decided_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     decided_by: str = "system"
 
 
@@ -114,8 +114,8 @@ class DisputeCase(BaseModel):
     """Complete dispute case model tracking the full lifecycle."""
 
     case_id: str = Field(default_factory=lambda: str(uuid4()))
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Classification
     category: DisputeCategory | None = None
@@ -160,24 +160,24 @@ class DisputeCase(BaseModel):
             {
                 "from_stage": self.stage.value,
                 "to_stage": new_stage.value,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "note": note,
             }
         )
         self.stage = new_stage
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(UTC)
 
     def add_evidence(self, evidence: DisputeEvidence) -> None:
         """Add evidence to the dispute case."""
         self.evidence.append(evidence)
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(UTC)
 
     def add_rule_evaluation(self, evaluation: RuleEvaluationResult) -> None:
         """Record a rule evaluation result."""
         self.rule_evaluations.append(evaluation)
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(UTC)
 
     def add_processing_note(self, note: str) -> None:
         """Add a processing note to the case."""
-        self.processing_notes.append(f"[{datetime.utcnow().isoformat()}] {note}")
-        self.updated_at = datetime.utcnow()
+        self.processing_notes.append(f"[{datetime.now(UTC).isoformat()}] {note}")
+        self.updated_at = datetime.now(UTC)

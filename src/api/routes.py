@@ -50,8 +50,8 @@ async def health_check() -> HealthResponse:
     return HealthResponse(
         status="healthy",
         version="0.1.0",
-        agents_loaded=len(brain._agents),
-        queue_depth=brain._queue.total_pending,
+        agents_loaded=brain.agent_count,
+        queue_depth=sum(brain.queue_depth.values()),
     )
 
 
@@ -361,6 +361,6 @@ async def queue_stats() -> QueueStatsResponse:
     """
     brain = get_brain()
     return QueueStatsResponse(
-        queue_depth=brain._queue.get_queue_depth(),
-        stats=brain._queue.get_stats(),
+        queue_depth=brain.queue_depth,
+        stats=brain.queue_stats,
     )
