@@ -301,8 +301,8 @@ class DisputeBrain:
         if case.dispute_currency is None:
             case.dispute_currency = case.transaction.currency
         if case.dispute_filed_date is None:
-            from datetime import datetime
-            case.dispute_filed_date = datetime.utcnow()
+            from datetime import UTC, datetime
+            case.dispute_filed_date = datetime.now(UTC)
 
         # Stage 3 - Agent Processing
         case.advance_stage(DisputeLifecycleStage.PROCESSING, "Routing to agent")
